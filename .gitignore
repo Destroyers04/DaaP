@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editors
+.idea/
+*.iml
+.vscode/
+
+# Secrets: never commit
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# OS junk files
+.DS_Store
+._*
+Thumbs.db
+desktop.ini

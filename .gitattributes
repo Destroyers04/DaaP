@@ -1,0 +1,5 @@
+# Store all text files with Linux line endings (LF), so Mac and Windows don't fight over them
+* text=auto eol=lf
+
+# Windows batch files must always use Windows line endings (CRLF)
+*.bat    text eol=crlf
