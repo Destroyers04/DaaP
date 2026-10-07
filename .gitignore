@@ -21,3 +21,8 @@ __pycache__/
 ._*
 Thumbs.db
 desktop.ini
+# Database: real user data, never commit
+data/
+*.db
+*.db-wal
+*.db-shm
