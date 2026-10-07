@@ -16,6 +16,9 @@ log = logging.getLogger("bot.roles")
 # max 0 = no limit
 BUTTON_ID = r"rolemenu:(?P<role_id>\d+):(?P<max>\d+)"
 MAX_MENU_ROLES = 10  # must match the role1..role10 parameters of /rolemenu
+MAX_BUTTONS = 25  # Discord's limit per message; /rolemenu-add can grow a menu up to this
+# Copy Message Link gives discord.com, ptb.discord.com, canary.discord.com or the old discordapp.com
+MESSAGE_LINK = r"https://(?:\w+\.)?discord(?:app)?\.com/channels/(?P<guild_id>\d+)/(?P<channel_id>\d+)/(?P<message_id>\d+)"
 
 
 # Weak values: a member's lock disappears once no click holds it, so this doesn't grow forever
@@ -29,14 +32,52 @@ def _member_lock(member_id: int) -> asyncio.Lock:
     return lock
 
 
-def menu_role_ids(message: discord.Message) -> set[int]:
-    ids = set()
+def menu_buttons(message: discord.Message) -> list[tuple[int, int, str]]:
+    """(role_id, max_roles, label) for each role button on the message, in order."""
+    buttons = []
     for row in message.components:
         for child in row.children:
             match = re.fullmatch(BUTTON_ID, child.custom_id or "")
             if match:
-                ids.add(int(match["role_id"]))
-    return ids
+                buttons.append((int(match["role_id"]), int(match["max"]), child.label or "Role"))
+    return buttons
+
+
+def menu_role_ids(message: discord.Message) -> set[int]:
+    return {role_id for role_id, _, _ in menu_buttons(message)}
+
+
+def build_view(buttons: list[tuple[int, int, str]]) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    for role_id, max_roles, label in buttons:
+        view.add_item(RoleButton(role_id, max_roles, label))
+    return view
+
+
+async def fetch_menu(interaction: discord.Interaction, message: str) -> discord.Message | None:
+    """The role menu a message link or ID points to, or None if it isn't one of the bot's menus."""
+    message = message.strip()
+    link = re.fullmatch(MESSAGE_LINK, message)
+    if link:
+        if int(link["guild_id"]) != interaction.guild.id:
+            return None
+        channel = interaction.guild.get_channel_or_thread(int(link["channel_id"]))
+        message_id = int(link["message_id"])
+    elif message.isdigit():
+        channel = interaction.channel
+        message_id = int(message)
+    else:
+        return None
+    # The admin role might not see every channel, so don't let it edit menus it can't see
+    if channel is None or not channel.permissions_for(interaction.user).view_channel:
+        return None
+    try:
+        menu = await channel.fetch_message(message_id)
+    except discord.HTTPException:
+        return None
+    if menu.author.id != interaction.client.user.id or not menu_buttons(menu):
+        return None
+    return menu
 
 
 class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_ID):
@@ -147,13 +188,74 @@ class Roles(commands.Cog):
             )
             return
 
-        view = discord.ui.View(timeout=None)
-        for role in roles:
-            view.add_item(RoleButton(role.id, max_roles or 0, role.name))
+        view = build_view([(role.id, max_roles or 0, role.name) for role in roles])
 
         await interaction.channel.send(text, view=view)
         await interaction.response.send_message("Role menu posted.", ephemeral=True)
         log.info(f"{interaction.user} posted a role menu in #{interaction.channel} with {', '.join(r.name for r in roles)}")
+
+    @app_commands.command(name="rolemenu-add", description="Add a role button to a role menu")
+    @admin_only
+    @app_commands.describe(
+        message="Link to the role menu message (right-click it → Copy Message Link), or its ID if it's in this channel",
+        role="Role to add",
+    )
+    async def rolemenu_add(self, interaction: discord.Interaction, message: str, role: discord.Role):
+        await interaction.response.defer(ephemeral=True)
+        menu = await fetch_menu(interaction, message)
+        if menu is None:
+            await reply(interaction, "I couldn't find a role menu at that link or ID.")
+            return
+
+        buttons = menu_buttons(menu)
+        if role.id in {role_id for role_id, _, _ in buttons}:
+            await reply(interaction, f"**{role.name}** is already in that menu.")
+            return
+        if len(buttons) >= MAX_BUTTONS:
+            await reply(interaction, f"That menu is full ({MAX_BUTTONS} roles). Post a new menu for more roles.")
+            return
+        if role.is_default() or role.managed or role >= interaction.guild.me.top_role:
+            await reply(interaction, f"I can't hand out {role.name}. Move my role above it in Server Settings → Roles.")
+            return
+
+        # Every button in a menu carries the same limit, so the new one copies it
+        buttons.append((role.id, buttons[0][1], role.name))
+        await menu.edit(view=build_view(buttons))
+
+        text = f"Added **{role.name}** to the menu."
+        left = MAX_BUTTONS - len(buttons)
+        if left == 0:
+            text += f"\nThe menu is now full ({MAX_BUTTONS} roles)."
+        elif left <= 5:
+            text += f"\nOnly {left} more role{'s' if left != 1 else ''} fit in this menu."
+        await reply(interaction, text)
+        log.info(f"{interaction.user} added {role.name} to the role menu {menu.id} in #{menu.channel}")
+
+    @app_commands.command(name="rolemenu-remove", description="Remove a role button from a role menu")
+    @admin_only
+    @app_commands.describe(
+        message="Link to the role menu message (right-click it → Copy Message Link), or its ID if it's in this channel",
+        role="Role to remove (members who have it keep it)",
+    )
+    async def rolemenu_remove(self, interaction: discord.Interaction, message: str, role: discord.Role):
+        await interaction.response.defer(ephemeral=True)
+        menu = await fetch_menu(interaction, message)
+        if menu is None:
+            await reply(interaction, "I couldn't find a role menu at that link or ID.")
+            return
+
+        buttons = menu_buttons(menu)
+        remaining = [b for b in buttons if b[0] != role.id]
+        if len(remaining) == len(buttons):
+            await reply(interaction, f"**{role.name}** isn't in that menu.")
+            return
+        if not remaining:
+            await reply(interaction, "That's the last role in the menu. Delete the message instead.")
+            return
+
+        await menu.edit(view=build_view(remaining))
+        await reply(interaction, f"Removed **{role.name}** from the menu.")
+        log.info(f"{interaction.user} removed {role.name} from the role menu {menu.id} in #{menu.channel}")
 
 
 async def setup(bot: commands.Bot):
