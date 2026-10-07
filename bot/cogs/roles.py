@@ -1,15 +1,32 @@
+import asyncio
 import logging
 import re
+import weakref
 
 import discord
 from discord import app_commands
 from discord.ext import commands
+
+from bot.checks import admin_only
+from bot.ui import reply
 
 log = logging.getLogger("bot.roles")
 
 # Role and limit live in the button's custom_id, so menus survive restarts without any config.
 # max 0 = no limit
 BUTTON_ID = r"rolemenu:(?P<role_id>\d+):(?P<max>\d+)"
+MAX_MENU_ROLES = 10  # must match the role1..role10 parameters of /rolemenu
+
+
+# Weak values: a member's lock disappears once no click holds it, so this doesn't grow forever
+_member_locks: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
+
+
+def _member_lock(member_id: int) -> asyncio.Lock:
+    lock = _member_locks.get(member_id)
+    if lock is None:
+        lock = _member_locks[member_id] = asyncio.Lock()
+    return lock
 
 
 def menu_role_ids(message: discord.Message) -> set[int]:
@@ -39,49 +56,53 @@ class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_ID):
         return cls(int(match["role_id"]), int(match["max"]))
 
     async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         role = interaction.guild.get_role(self.role_id)
         if role is None:
             log.warning(f"Role {self.role_id} does not exist on this server")
-            await interaction.response.send_message("That role no longer exists, ask an admin.", ephemeral=True)
+            await reply(interaction, "That role no longer exists, ask an admin.")
             return
 
-        member = interaction.user
         menu_ids = menu_role_ids(interaction.message)
-        current = [r for r in member.roles if r.id in menu_ids]
+        # One click per member at a time, otherwise two quick clicks both see the old roles and
+        # a pick-one menu ends up with two roles, or a limited menu goes over its limit
+        async with _member_lock(interaction.user.id):
+            try:
+                # Fetched fresh: the cache only updates when Discord's event arrives, which can be after the next click
+                member = await interaction.guild.fetch_member(interaction.user.id)
+                current = [r for r in member.roles if r.id in menu_ids]
+                if role in member.roles:
+                    await member.remove_roles(role)
+                    current.remove(role)
+                    text = f"Removed **{role.name}**."
+                elif self.max_roles == 1:
+                    # Add first, so a failure never leaves the member with no role from the menu
+                    await member.add_roles(role)
+                    if current:
+                        await member.remove_roles(*current)
+                    current = [role]
+                    text = f"You now have **{role.name}**."
+                elif self.max_roles and len(current) >= self.max_roles:
+                    text = f"You can have at most {self.max_roles} roles from this menu. Remove one first."
+                else:
+                    await member.add_roles(role)
+                    current.append(role)
+                    text = f"You now have **{role.name}**."
+            except discord.HTTPException:
+                log.exception(f"Could not change role {role.name} - is the bot's role above it?")
+                await reply(interaction, "I couldn't change your roles, ask an admin.")
+                return
 
-        try:
-            if role in member.roles:
-                await member.remove_roles(role)
-                current.remove(role)
-                reply = f"Removed **{role.name}**."
-            elif self.max_roles == 1:
-                # Add first, so a failure never leaves the member with no role from the menu
-                await member.add_roles(role)
-                if current:
-                    await member.remove_roles(*current)
-                current = [role]
-                reply = f"You now have **{role.name}**."
-            elif self.max_roles and len(current) >= self.max_roles:
-                reply = f"You can have at most {self.max_roles} roles from this menu. Remove one first."
-            else:
-                await member.add_roles(role)
-                current.append(role)
-                reply = f"You now have **{role.name}**."
-        except discord.HTTPException:
-            log.exception(f"Could not change role {role.name} - is the bot's role above it?")
-            await interaction.response.send_message("I couldn't change your roles, ask an admin.", ephemeral=True)
-            return
-
-        log.info(f"Role menu: {member} clicked {role.name} -> {reply}")
+        log.info(f"Role menu: {member} clicked {role.name} -> {text}")
 
         # member.roles isn't refreshed after the change, so `current` is kept up to date by hand above.
         # Pick-one menus skip the list, since the reply already names their only role.
         if self.max_roles != 1:
             if current:
-                reply += "\nYou currently have these roles: " + ", ".join(f"**{r.name}**" for r in current)
+                text += "\nYou currently have these roles: " + ", ".join(f"**{r.name}**" for r in current)
             else:
-                reply += "\nYou currently have no roles from this menu."
-        await interaction.response.send_message(reply, ephemeral=True)
+                text += "\nYou currently have no roles from this menu."
+        await reply(interaction, text)
 
 
 class Roles(commands.Cog):
@@ -92,8 +113,7 @@ class Roles(commands.Cog):
         self.bot.add_dynamic_items(RoleButton)
 
     @app_commands.command(name="rolemenu", description="Post a role menu with buttons in this channel")
-    @app_commands.default_permissions(administrator=True)
-    @app_commands.guild_only()
+    @admin_only
     @app_commands.describe(
         text="Message shown above the buttons",
         max_roles="How many roles a member can have from this menu (1 = pick only one). Empty = no limit",
@@ -107,9 +127,15 @@ class Roles(commands.Cog):
         role3: discord.Role | None = None,
         role4: discord.Role | None = None,
         role5: discord.Role | None = None,
-        max_roles: app_commands.Range[int, 1, 5] | None = None,
+        role6: discord.Role | None = None,
+        role7: discord.Role | None = None,
+        role8: discord.Role | None = None,
+        role9: discord.Role | None = None,
+        role10: discord.Role | None = None,
+        max_roles: app_commands.Range[int, 1, MAX_MENU_ROLES] | None = None,
     ):
-        roles = list(dict.fromkeys(r for r in (role1, role2, role3, role4, role5) if r))
+        picked = (role1, role2, role3, role4, role5, role6, role7, role8, role9, role10)
+        roles = list(dict.fromkeys(r for r in picked if r))
 
         bot_top = interaction.guild.me.top_role
         bad = [r for r in roles if r.is_default() or r.managed or r >= bot_top]
