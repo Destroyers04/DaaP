@@ -10,7 +10,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot import security
-from bot.checks import admin_check, admin_only
+from bot.checks import AdminCog, ModeratorCog
 from bot.db import SendBlocked
 from bot.mailer import MailError
 from bot.tickets import OpenTicketButton, ticket_view, tickets_enabled
@@ -24,12 +24,12 @@ def menu_text(tickets: bool) -> str:
         "You need to verify your company email to get into this server.\n"
         f"Click **Verify**, enter your work email, and we'll send you a {security.CODE_LENGTH}-digit code (valid for {security.CODE_TTL // 60} minutes).\n"
         "No email? Check your spam or quarantine folder, or "
-        + ("click **Need help** to talk to an admin." if tickets else "ask an admin.")
+        + ("click **Need help** to talk to a moderator." if tickets else "ask a moderator.")
     )
 
 
 def get_help(tickets: bool) -> str:
-    return "open a ticket" if tickets else "ask an admin"
+    return "open a ticket" if tickets else "ask a moderator"
 
 
 def pending_view(tickets: bool) -> discord.ui.View:
@@ -150,7 +150,7 @@ class VerifyButton(discord.ui.DynamicItem[discord.ui.Button], template=r"verify:
 
         role = await verified_role(db, interaction.guild)
         if role is None:
-            await reply(interaction, "Verification isn't set up, ask an admin.")
+            await reply(interaction, "Verification isn't set up, ask a moderator.")
             return
 
         if await db.get_verified(user.id):
@@ -160,7 +160,7 @@ class VerifyButton(discord.ui.DynamicItem[discord.ui.Button], template=r"verify:
             if await give_role(user, role, "Already verified"):
                 await reply(interaction, "You're already verified ✅")
             else:
-                await reply(interaction, "You're already verified, but I couldn't give you the role. Ask an admin.")
+                await reply(interaction, "You're already verified, but I couldn't give you the role. Ask a moderator.")
             return
 
         pending = await db.get_pending(user.id)
@@ -214,7 +214,7 @@ class EmailModal(discord.ui.Modal, title="Verify your work email"):
         now = int(time.time())
 
         if await verified_role(db, interaction.guild) is None:
-            await reply(interaction, "Verification isn't set up, ask an admin.")
+            await reply(interaction, "Verification isn't set up, ask a moderator.")
             return
         if await db.get_verified(user.id):
             await reply(interaction, "You're already verified ✅ Click **Verify** if you're missing the role.")
@@ -334,19 +334,12 @@ class CodeModal(discord.ui.Modal, title="Enter your code"):
 
         role = await verified_role(db, interaction.guild)
         if role is None or not await give_role(member, role, "Email verified"):
-            await reply(interaction, "You're verified, but I couldn't give you the role. Ask an admin.")
+            await reply(interaction, "You're verified, but I couldn't give you the role. Ask a moderator.")
             return
         await reply(interaction, "✅ You're verified, welcome!")
 
 
 class Verify(commands.Cog):
-    domains_group = app_commands.Group(
-        name="verifydomains",
-        description="Manage allowed email domains",
-        default_permissions=discord.Permissions(administrator=True),
-        guild_only=True,
-    )
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -361,13 +354,34 @@ class Verify(commands.Cog):
     async def cleanup(self):
         await self.bot.db.cleanup_expired(int(time.time()))
 
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        # Needs the members intent
+        if member.guild.id != self.bot.guild_id or member.bot:
+            return
+        verified = await self.bot.db.get_verified(member.id)
+        if not verified:
+            return
+        role = await verified_role(self.bot.db, member.guild)
+        if role and await give_role(member, role, "Previously verified"):
+            log.info(f"Re-gave verified role to {member.id}")
+        # Discord drops nicknames when someone leaves
+        if verified["nickname"]:
+            await set_nickname(member, verified["nickname"])
+
+
+class VerifyAdmin(AdminCog):
+    domains_group = app_commands.Group(name="verifydomains", description="Manage allowed email domains")
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
     @app_commands.command(name="verifymenu", description="Save the verification settings and post the Verify menu here")
-    @admin_only
     @app_commands.describe(
         role="Role given to verified members",
         domains="Allowed email domains, comma-separated (e.g. example.com, example.org)",
         ticket_category="Category where help tickets are created",
-        admin_role="Role that can see and resolve tickets",
+        moderator_role="Role that handles tickets and can verify members by hand",
     )
     async def verifymenu(
         self,
@@ -375,7 +389,7 @@ class Verify(commands.Cog):
         role: discord.Role,
         domains: str,
         ticket_category: discord.CategoryChannel | None = None,
-        admin_role: discord.Role | None = None,
+        moderator_role: discord.Role | None = None,
     ):
         await interaction.response.defer(ephemeral=True)
         guild = interaction.guild
@@ -397,7 +411,7 @@ class Verify(commands.Cog):
             return
 
         await self.bot.db.save_settings(
-            guild.id, role.id, ticket_category and ticket_category.id, admin_role and admin_role.id, good
+            guild.id, role.id, ticket_category and ticket_category.id, moderator_role and moderator_role.id, good
         )
 
         tickets = ticket_category is not None
@@ -420,14 +434,12 @@ class Verify(commands.Cog):
         return await self.bot.db.get_domains(interaction.guild.id)
 
     @domains_group.command(name="list", description="Show the allowed email domains")
-    @admin_check
     async def domains_list(self, interaction: discord.Interaction):
         current = await self._domains_or_reply(interaction)
         if current is not None:
             await reply(interaction, f"Allowed domains: {', '.join(current)}")
 
     @domains_group.command(name="add", description="Allow more email domains")
-    @admin_check
     @app_commands.describe(domains="Comma-separated, e.g. example.com, example.org")
     async def domains_add(self, interaction: discord.Interaction, domains: str):
         if await self._domains_or_reply(interaction) is None:
@@ -442,7 +454,6 @@ class Verify(commands.Cog):
         log.info(f"{interaction.user} added verify domains {', '.join(good)}")
 
     @domains_group.command(name="remove", description="Stop allowing email domains")
-    @admin_check
     @app_commands.describe(domains="Comma-separated, e.g. example.org")
     async def domains_remove(self, interaction: discord.Interaction, domains: str):
         current = await self._domains_or_reply(interaction)
@@ -461,8 +472,12 @@ class Verify(commands.Cog):
         await reply(interaction, f"Allowed domains: {', '.join(current)}")
         log.info(f"{interaction.user} removed verify domains {', '.join(to_remove)}")
 
+
+class VerifyModerator(ModeratorCog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
     @app_commands.command(name="unverify", description="Unlink a user's email and remove their verified role")
-    @admin_only
     async def unverify(self, interaction: discord.Interaction, user: discord.User):
         # discord.User and not Member, so it also works for people who already left
         await interaction.response.defer(ephemeral=True)
@@ -488,7 +503,6 @@ class Verify(commands.Cog):
         log.info(f"{interaction.user} unverified {user.id}")
 
     @app_commands.command(name="forceverify", description="Verify a member with their email, without a code")
-    @admin_only
     @app_commands.describe(user="Member to verify", email="Their work email, linked to their account like a normal verification")
     async def forceverify(self, interaction: discord.Interaction, user: discord.Member, email: str):
         await interaction.response.defer(ephemeral=True)
@@ -511,7 +525,7 @@ class Verify(commands.Cog):
         nickname = nickname_from_email(email)
         owner = await db.force_verify(user.id, email_hash, nickname, now)
         if owner is not None:
-            # Only admins see this reply, so naming the other account doesn't break the decoy
+            # Only moderators and admins see this reply, so naming the other account doesn't break the decoy
             await reply(interaction, f"That email is already linked to <@{owner}>. Run /unverify on them first.")
             return
         log.info(f"{interaction.user} force-verified {user.id}")
@@ -523,21 +537,8 @@ class Verify(commands.Cog):
             return
         await reply(interaction, f"✅ Verified {user.mention} as {security.mask_email(email)}.")
 
-    @commands.Cog.listener()
-    async def on_member_join(self, member: discord.Member):
-        # Needs the members intent
-        if member.guild.id != self.bot.guild_id or member.bot:
-            return
-        verified = await self.bot.db.get_verified(member.id)
-        if not verified:
-            return
-        role = await verified_role(self.bot.db, member.guild)
-        if role and await give_role(member, role, "Previously verified"):
-            log.info(f"Re-gave verified role to {member.id}")
-        # Discord drops nicknames when someone leaves
-        if verified["nickname"]:
-            await set_nickname(member, verified["nickname"])
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Verify(bot))
+    await bot.add_cog(VerifyAdmin(bot))
+    await bot.add_cog(VerifyModerator(bot))

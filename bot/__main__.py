@@ -10,6 +10,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from bot import cogs
+from bot.checks import NotAllowed
 from bot.db import Database
 from bot.mailer import Mailer
 from bot.security import MIN_SECRET_LENGTH
@@ -60,8 +61,8 @@ class Bot(commands.Bot):
 
 
 async def on_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        message = "You need to be an admin to use this."
+    if isinstance(error, NotAllowed):
+        message = str(error)
     else:
         log.error(f"Command /{interaction.command.name if interaction.command else '?'} failed", exc_info=error)
         message = "Something went wrong :("

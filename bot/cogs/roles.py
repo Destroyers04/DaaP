@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bot.checks import admin_only
+from bot.checks import AdminCog
 from bot.ui import reply
 
 log = logging.getLogger("bot.roles")
@@ -68,8 +68,7 @@ async def fetch_menu(interaction: discord.Interaction, message: str) -> discord.
         message_id = int(message)
     else:
         return None
-    # The admin role might not see every channel, so don't let it edit menus it can't see
-    if channel is None or not channel.permissions_for(interaction.user).view_channel:
+    if channel is None:
         return None
     try:
         menu = await channel.fetch_message(message_id)
@@ -101,7 +100,7 @@ class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_ID):
         role = interaction.guild.get_role(self.role_id)
         if role is None:
             log.warning(f"Role {self.role_id} does not exist on this server")
-            await reply(interaction, "That role no longer exists, ask an admin.")
+            await reply(interaction, "That role no longer exists, ask a moderator.")
             return
 
         menu_ids = menu_role_ids(interaction.message)
@@ -131,7 +130,7 @@ class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_ID):
                     text = f"You now have **{role.name}**."
             except discord.HTTPException:
                 log.exception(f"Could not change role {role.name} - is the bot's role above it?")
-                await reply(interaction, "I couldn't change your roles, ask an admin.")
+                await reply(interaction, "I couldn't change your roles, ask a moderator.")
                 return
 
         log.info(f"Role menu: {member} clicked {role.name} -> {text}")
@@ -146,7 +145,7 @@ class RoleButton(discord.ui.DynamicItem[discord.ui.Button], template=BUTTON_ID):
         await reply(interaction, text)
 
 
-class Roles(commands.Cog):
+class Roles(AdminCog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -154,7 +153,6 @@ class Roles(commands.Cog):
         self.bot.add_dynamic_items(RoleButton)
 
     @app_commands.command(name="rolemenu", description="Post a role menu with buttons in this channel")
-    @admin_only
     @app_commands.describe(
         text="Message shown above the buttons",
         max_roles="How many roles a member can have from this menu (1 = pick only one). Empty = no limit",
@@ -195,7 +193,6 @@ class Roles(commands.Cog):
         log.info(f"{interaction.user} posted a role menu in #{interaction.channel} with {', '.join(r.name for r in roles)}")
 
     @app_commands.command(name="rolemenu-add", description="Add a role button to a role menu")
-    @admin_only
     @app_commands.describe(
         message="Link to the role menu message (right-click it → Copy Message Link), or its ID if it's in this channel",
         role="Role to add",
@@ -232,7 +229,6 @@ class Roles(commands.Cog):
         log.info(f"{interaction.user} added {role.name} to the role menu {menu.id} in #{menu.channel}")
 
     @app_commands.command(name="rolemenu-remove", description="Remove a role button from a role menu")
-    @admin_only
     @app_commands.describe(
         message="Link to the role menu message (right-click it → Copy Message Link), or its ID if it's in this channel",
         role="Role to remove (members who have it keep it)",

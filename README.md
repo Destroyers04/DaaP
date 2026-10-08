@@ -3,10 +3,19 @@
 Discord bot for our work Discord server, written in Python with [discord.py](https://discordpy.readthedocs.io/).
 
 Features:
-- `/ping` checks that the bot is alive (admins only)
-- `/ticket [reason]` opens a private ticket with the admins
+- `/ping` checks that the bot is alive (moderators and admins)
+- `/ticket [reason]` opens a private ticket with the moderators
 - **Role menus:** admins post a message with role buttons, members click to get or remove a role
-- **Email verification:** members verify their company email with a code to get access, with help tickets for admins
+- **Email verification:** members verify their company email with a code to get access, with help tickets for moderators
+
+## Admins and moderators
+
+The bot has two levels, and admins can do everything moderators can:
+
+- **Admin:** anyone with the **Administrator** permission on the server. Admins set the bot up: `/verifymenu`, `/verifydomains` and the role menu commands.
+- **Moderator:** anyone with the moderator role chosen in `/verifymenu`. Moderators handle tickets and members: **Resolve**, **Moderator info**, `/forceverify`, `/unverify` and `/ping`.
+
+Discord shows these commands only to members with Administrator by default. To let moderators see theirs, go to **Server Settings → Integrations → DaaP** and allow the moderator role on `/forceverify`, `/unverify` and `/ping`. Only allow it per command: the bot refuses admin commands from moderators anyway, but they would still see them in the list.
 
 ## Requirements
 
@@ -75,11 +84,10 @@ Run `/rolemenu` in the channel where the menu should be (admins only):
 
 The bot posts the message and it stays in the channel. Clicking a button gives the role, clicking again removes it. Menus keep working after restarts, so you only post them once. To change a menu, delete the message and post a new one.
 
-Admin-only is the default. Server admins can change who sees the command under Server Settings → Integrations.
 
 ## Email verification
 
-Members verify their company email to get a Verified role. They click **Verify**, enter their work email, and type the 6-digit code the bot emails them (valid for 10 minutes). One Discord account can link one email, and one email one account. Members who get stuck click **Need help**, which opens a private ticket channel for admins.
+Members verify their company email to get a Verified role. They click **Verify**, enter their work email, and type the 6-digit code the bot emails them (valid for 10 minutes). One Discord account can link one email, and one email one account. Members who get stuck click **Need help**, which opens a private ticket channel for moderators.
 
 Setup on Discord:
 
@@ -92,8 +100,13 @@ Admin commands:
 
 | Command | What it does |
 |---|---|
-| `/verifymenu role domains [ticket_category] [admin_role]` | Saves the settings and posts the Verify menu in this channel. Run it again to change the settings |
+| `/verifymenu role domains [ticket_category] [moderator_role]` | Saves the settings and posts the Verify menu in this channel. Run it again to change the settings. The moderator role sees and handles tickets |
 | `/verifydomains list` / `add` / `remove` | Shows or edits the allowed email domains (comma-separated) |
+
+Moderator commands:
+
+| Command | What it does |
+|---|---|
 | `/unverify user` | Unlinks the user's email and removes the Verified role, so they or someone else can verify with it again |
 | `/forceverify user email` | Verifies a member without a code. The email is linked like a normal verification, so the one-email-per-account rule still applies |
 
@@ -120,6 +133,8 @@ async def setup(bot: commands.Bot):
 ```
 
 Restart the bot and the command is registered on the server.
+
+For commands that only admins or moderators may use, subclass `AdminCog` or `ModeratorCog` from `bot/checks.py` instead of `commands.Cog`. Every command in the cog then gets that level. A feature with commands on several levels uses one cog per level in the same file, like `bot/cogs/verify.py`.
 
 ## Contributing
 
