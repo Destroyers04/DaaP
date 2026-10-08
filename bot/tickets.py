@@ -6,7 +6,7 @@ import time
 
 import discord
 
-from bot.checks import is_admin
+from bot.checks import is_moderator
 from bot.ui import reply
 
 log = logging.getLogger("bot.tickets")
@@ -65,9 +65,9 @@ async def open_ticket(interaction: discord.Interaction, reason: str, verificatio
     settings = await db.get_settings(guild.id)
     category = ticket_category(guild, settings)
     if category is None:
-        await reply(interaction, "Tickets aren't set up, ask an admin directly.")
+        await reply(interaction, "Tickets aren't set up, ask a moderator directly.")
         return
-    admin_role = settings["admin_role_id"] and guild.get_role(settings["admin_role_id"])
+    moderator_role = settings["moderator_role_id"] and guild.get_role(settings["moderator_role_id"])
 
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -78,8 +78,8 @@ async def open_ticket(interaction: discord.Interaction, reason: str, verificatio
             view_channel=True, send_messages=True, read_message_history=True, attach_files=True
         ),
     }
-    if admin_role:
-        overwrites[admin_role] = discord.PermissionOverwrite(
+    if moderator_role:
+        overwrites[moderator_role] = discord.PermissionOverwrite(
             view_channel=True, send_messages=True, read_message_history=True
         )
 
@@ -91,7 +91,7 @@ async def open_ticket(interaction: discord.Interaction, reason: str, verificatio
         )
     except discord.HTTPException:
         log.exception(f"Could not create a ticket channel for {user.id}")
-        await reply(interaction, "I couldn't open a ticket, ask an admin directly.")
+        await reply(interaction, "I couldn't open a ticket, ask a moderator directly.")
         return
 
     try:
@@ -106,12 +106,12 @@ async def open_ticket(interaction: discord.Interaction, reason: str, verificatio
     view = discord.ui.View(timeout=None)
     view.add_item(ResolveTicketButton())
     if verification:
-        view.add_item(AdminInfoButton())
+        view.add_item(ModeratorInfoButton())
     text = f"🏷️ **{discord.utils.escape_markdown(reason)}**\n{user.mention} needs help."
-    if admin_role:
-        text += f" {admin_role.mention}"
-    # The reason is user text, so only the user and the admin role may be pinged
-    mentions = discord.AllowedMentions(everyone=False, users=[user], roles=[admin_role] if admin_role else False)
+    if moderator_role:
+        text += f" {moderator_role.mention}"
+    # The reason is user text, so only the user and the moderator role may be pinged
+    mentions = discord.AllowedMentions(everyone=False, users=[user], roles=[moderator_role] if moderator_role else False)
     await channel.send(text, view=view, allowed_mentions=mentions)
 
     await reply(interaction, f"Ticket opened: {channel.mention}")
@@ -133,8 +133,8 @@ class ResolveTicketButton(discord.ui.DynamicItem[discord.ui.Button], template=r"
         member = interaction.user
         channel = interaction.channel
 
-        if not await is_admin(interaction):
-            await reply(interaction, "Only admins can resolve tickets.")
+        if not await is_moderator(interaction):
+            await reply(interaction, "Only moderators and admins can resolve tickets.")
             return
 
         await db.close_ticket(channel.id, member.id, int(time.time()))
@@ -148,11 +148,12 @@ class ResolveTicketButton(discord.ui.DynamicItem[discord.ui.Button], template=r"
             log.exception(f"Could not delete ticket channel {channel.id}")
 
 
-class AdminInfoButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ticket:admininfo"):
+class ModeratorInfoButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ticket:admininfo"):
     def __init__(self):
         super().__init__(
             discord.ui.Button(
-                label="Admin info", style=discord.ButtonStyle.secondary, emoji="ℹ️", custom_id="ticket:admininfo"
+                # The custom_id is unchanged so buttons on tickets that are already open keep working
+                label="Moderator info", style=discord.ButtonStyle.secondary, emoji="ℹ️", custom_id="ticket:admininfo"
             )
         )
 
@@ -161,8 +162,8 @@ class AdminInfoButton(discord.ui.DynamicItem[discord.ui.Button], template=r"tick
         return cls()
 
     async def callback(self, interaction: discord.Interaction):
-        if not await is_admin(interaction):
-            await reply(interaction, "Only admins can use this.")
+        if not await is_moderator(interaction):
+            await reply(interaction, "Only moderators and admins can use this.")
             return
         await reply(
             interaction,

@@ -70,6 +70,10 @@ MIGRATIONS = [
     ALTER TABLE pending_verifications ADD COLUMN nickname TEXT;
     ALTER TABLE verified_emails ADD COLUMN nickname TEXT;
     """,
+    """
+    -- Admins are now whoever has the Administrator permission, so the saved role is the moderator role
+    ALTER TABLE verify_settings RENAME COLUMN admin_role_id TO moderator_role_id;
+    """,
 ]
 
 SEND_LOG_KEEP = 7 * security.DAY
@@ -248,14 +252,14 @@ class Database:
         guild_id: int,
         role_id: int,
         ticket_category_id: int | None,
-        admin_role_id: int | None,
+        moderator_role_id: int | None,
         domains: list[str],
     ):
         async with self._transaction() as conn:
             await conn.execute(
-                "INSERT OR REPLACE INTO verify_settings (guild_id, role_id, ticket_category_id, admin_role_id)"
+                "INSERT OR REPLACE INTO verify_settings (guild_id, role_id, ticket_category_id, moderator_role_id)"
                 " VALUES (?, ?, ?, ?)",
-                (guild_id, role_id, ticket_category_id, admin_role_id),
+                (guild_id, role_id, ticket_category_id, moderator_role_id),
             )
             await conn.execute("DELETE FROM verify_domains WHERE guild_id = ?", (guild_id,))
             await conn.executemany(
